@@ -1,6 +1,6 @@
 # ChatGPT API LINE Bot AWS Serverless
 
-[日本語]()
+[日本語](https://github.com/dyoshikawa/chatgpt-api-line-bot-aws-serverless/blob/main/README-ja.md)
 
 [[ChatGPT API][AWS Serverless] How to build a LINE bot that remembers conversations and context with you using ChatGPT API on AWS Serverless | DevelopersIO](https://dev.classmethod.jp/articles/chatgpt-api-line-bot-aws-serverless/)
 
