@@ -1,0 +1,24 @@
+{
+  "name": "chatgpt-api-line-bot-aws-serverless",
+  "version": "0.0.0",
+  "description": "",
+  "private": true,
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "workspaces": [
+    "iac",
+    "server"
+  ],
+  "volta": {
+    "node": "18.14.2",
+    "npm": "9.6.0"
+  },
+  "devDependencies": {
+    "@tsconfig/strictest": "1.0.2",
+    "esbuild": "0.17.11",
+    "prettier": "2.8.4",
+    "source-map-support": "0.5.21",
+    "typescript": "4.9.5"
+  }
+}
