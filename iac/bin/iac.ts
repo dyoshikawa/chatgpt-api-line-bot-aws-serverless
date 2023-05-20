@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 import "source-map-support/register";
 import * as cdk from "aws-cdk-lib";
-import { MainStack } from "../lib/main-stack";
+import { ChatGptLineBotSampleStack } from "../lib/chat-gpt-line-bot-sample-stack";
 
 const app = new cdk.App();
-new MainStack(app, "MainStack", {
+new ChatGptLineBotSampleStack(app, "ChatGptLineBotSampleStack", {
   env: {
     region: "ap-northeast-1",
   },

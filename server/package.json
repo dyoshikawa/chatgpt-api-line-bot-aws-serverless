@@ -17,5 +17,8 @@
     "lodash-es": "4.17.21",
     "openai": "3.2.1",
     "uuid": "9.0.0"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "8.10.115"
   }
 }

@@ -1,10 +1,16 @@
 import "source-map-support/register";
-import serverlessExpress from "@vendia/serverless-express";
 import express from "express";
-import { Client, middleware, TextMessage, WebhookEvent } from "@line/bot-sdk";
+import {
+  Client,
+  middleware,
+  TextMessage,
+  validateSignature,
+  WebhookEvent,
+} from "@line/bot-sdk";
 import { ChatCompletionRequestMessage, Configuration, OpenAIApi } from "openai";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
+  BatchWriteCommand,
   DynamoDBDocumentClient,
   PutCommand,
   QueryCommand,
@@ -14,13 +20,15 @@ import dayjs from "dayjs";
 import utc from "dayjs/plugin/utc";
 import advancedFormat from "dayjs/plugin/advancedFormat";
 import { orderBy } from "lodash-es";
+import { Callback, Context, LexEvent, LexEventSlots } from "aws-lambda";
 
 dayjs.extend(utc);
 dayjs.extend(advancedFormat);
 
 const nanoSecondFormat = "YYYY-MM-DDTHH:mm:ss.SSSSSSSSS[Z]";
 
-const messagesTableName = "messages";
+const messagesTableName = "chatGptLineBotSample-messages";
+const messagesTableUserIdIndexName = "chatGptLineBotSample-userIdIndex";
 
 const ddbDocClient = DynamoDBDocumentClient.from(
   new DynamoDBClient({
@@ -28,14 +36,20 @@ const ddbDocClient = DynamoDBDocumentClient.from(
   })
 );
 
+if (process.env.CHANNEL_ACCESS_TOKEN == null) {
+  throw new Error("CHANNEL_ACCESS_TOKEN is not set");
+}
 const lineBotClient = new Client({
-  channelAccessToken: process.env.CHANNEL_ACCESS_TOKEN ?? "",
-  channelSecret: process.env.CHANNEL_SECRET ?? "",
+  channelAccessToken: process.env.CHANNEL_ACCESS_TOKEN,
+  channelSecret: process.env.CHANNEL_SECRET,
 });
 
+if (process.env.OPEN_AI_API_KEY == null) {
+  throw new Error("OPEN_AI_API_KEY is not set");
+}
 const openAiApi = new OpenAIApi(
   new Configuration({
-    apiKey: process.env.OPEN_AI_SECRET ?? "",
+    apiKey: process.env.OPEN_AI_API_KEY,
   })
 );
 
@@ -46,7 +60,23 @@ const handleEvent = async (event: WebhookEvent) => {
 
   const userId = event.source.userId!;
   const userMessageContent = event.message.text;
-  // ユーザの発言履歴を保存する
+
+  // 会話中ユーザのこれまでの発言履歴を取得する
+  const { Items: messages = [] } = await ddbDocClient.send(
+    new QueryCommand({
+      TableName: messagesTableName,
+      IndexName: messagesTableUserIdIndexName,
+      KeyConditionExpression: "#userId = :userId",
+      ExpressionAttributeNames: {
+        "#userId": "userId",
+      },
+      ExpressionAttributeValues: {
+        ":userId": userId,
+      },
+    })
+  );
+
+  // ユーザの発言を保存する
   await ddbDocClient.send(
     new PutCommand({
       TableName: messagesTableName,
@@ -60,60 +90,53 @@ const handleEvent = async (event: WebhookEvent) => {
     })
   );
 
-  // 会話中ユーザのこれまでの発言履歴を取得する
-  const { Items: messages = [] } = await ddbDocClient.send(
-    new QueryCommand({
-      TableName: messagesTableName,
-      IndexName: "userIdIndex",
-      KeyConditionExpression: "#userId = :userId",
-      ExpressionAttributeNames: {
-        "#userId": "userId",
-      },
-      ExpressionAttributeValues: {
-        ":userId": userId,
+  // 時系列順にソートする
+  const orderedMessages = orderBy(messages, "typedAt", "asc");
+
+  // 最新3件を取得
+  const queriedMessages = orderedMessages.splice(-3);
+
+  // 最新3件より古い会話を削除する
+  await ddbDocClient.send(
+    new BatchWriteCommand({
+      RequestItems: {
+        [messagesTableName]: orderedMessages.map((message) => ({
+          DeleteRequest: {
+            Key: {
+              id: message.id,
+            },
+          },
+        })),
       },
     })
-  );
-
-  // 時系列順にソートする
-  const queriedMessages: ChatCompletionRequestMessage[] = orderBy(
-    messages,
-    "typedAt",
-    "asc"
-  ).map(
-    (message) =>
-      ({
-        role: message.role,
-        content: message.content,
-      } as ChatCompletionRequestMessage)
   );
 
   // ユーザとChatGPTの会話履歴をChatGPT APIに投げ、返答を得る
   const completion = await openAiApi.createChatCompletion({
     model: "gpt-3.5-turbo",
     messages: [
+      ...queriedMessages.map(
+        (message) =>
+          ({
+            role: message.role,
+            content: message.content,
+          } as ChatCompletionRequestMessage)
+      ),
       {
-        role: "system",
-        content:
-          "あなたは「くらにゃん」です。名前を聞かれたら、「くらにゃん」と答えてください。くらにゃんはWebフロントエンドプログラマーの傍ら、クラスメソッド株式会社の広報係をしています。クラスメソッドはAWSリセール、Webサービス受託開発などを手掛ける日本のIT企業です。DevelopersIO（ https://dev.classmethod.jp/ ）というテックブログが有名です。くらにゃんは静的型付けのメリットから、JavaScriptよりTypeScriptでコーディングすることを好みます。",
+        role: "user",
+        content: userMessageContent,
       },
-      {
-        role: "system",
-        content: "以後、語尾ににゃんを付けて話して下さい。",
-      },
-      {
-        role: "system",
-        content: "一人称を「某」にしてください。",
-      },
-      {
-        role: "system",
-        content:
-          "敬語を使うのをやめてください。また、絵文字をたくさん使って話してください。",
-      },
-    ].concat(queriedMessages) as ChatCompletionRequestMessage[],
+    ],
   });
-
   const chatGptMessageContent = completion.data.choices[0].message?.content!;
+
+  // ChatGPTの発言をLINE返信する
+  const repliedMessage: TextMessage = {
+    type: "text",
+    text: chatGptMessageContent,
+  };
+  await lineBotClient.replyMessage(event.replyToken, repliedMessage);
+
   // ChatGPTの発言を保存する
   await ddbDocClient.send(
     new PutCommand({
@@ -127,13 +150,6 @@ const handleEvent = async (event: WebhookEvent) => {
       },
     })
   );
-
-  // ChatGPTの発言をパラメータにLINE MessagingAPIを叩く
-  const repliedMessage: TextMessage = {
-    type: "text",
-    text: chatGptMessageContent,
-  };
-  return lineBotClient.replyMessage(event.replyToken, repliedMessage);
 };
 
 const app = express();
@@ -144,18 +160,28 @@ app.use(
   })
 );
 
-app.post("/webhook", async (req, res) => {
-  try {
-    const events: WebhookEvent[] = req.body.events;
-
-    const results = await Promise.all(events.map(handleEvent));
-    return res.json(results);
-  } catch (err) {
-    console.error(err);
-    return res.status(500);
+export const handler = async (
+  event: any,
+  _context: Context,
+  _callback: Callback
+) => {
+  if (process.env.CHANNEL_SECRET == null) {
+    throw new Error("CHANNEL_SECRET is not set");
   }
-});
+  console.info(JSON.stringify(event));
 
-export default app;
+  const isValid = validateSignature(
+    event.rawBody,
+    process.env.CHANNEL_SECRET,
+    event.params.header["x-line-signature"]
+  );
+  if (!isValid) {
+    throw new Error("Invalid signature");
+  }
 
-export const handler = serverlessExpress({ app });
+  const events: WebhookEvent[] = event.body.events;
+  console.info(JSON.stringify(events));
+
+  const results = await Promise.all(events.map(handleEvent));
+  console.info(JSON.stringify(results));
+};
